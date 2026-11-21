@@ -1,0 +1,66 @@
+# Development environment for the PiG extensions in this repository.
+#
+# mise pins the toolchain (Go, PiG) and runs the tasks. Go libraries are not
+# managed here: they live in each extension's go.mod, and the PiG SDK is
+# resolved from the copy PiG stages locally (see the `setup` task).
+#
+# All tasks are project-local: they are defined only in this file, run from
+# this directory (mise's default task dir is the config root), and never write
+# PiG's global settings (`pig install` is used only with --validate-only).
+
+[tools]
+go = "1.27"
+
+[tools."github:MichaelKinsy/PiG"]
+version = "0.7.0"
+asset_pattern = 'pig-{{ version }}-{{ os(macos="darwin") }}-{{ arch(x64="amd64") }}.tar.gz'
+
+[tasks.setup]
+description = "Generate go.work so go/gopls resolve the PiG SDK from PiG's staged copy"
+# go.work holds a machine-specific path, so it is generated and git-ignored.
+# Re-run after upgrading PiG: the staged SDK directory is named by content hash.
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+[ -f go.work ] || go work init
+go work use -r extensions
+go work edit -replace "github.com/MichaelKinsy/PiG/extensions/sdk=$(pig reload --sdk-path)"
+'''
+
+[tasks.fmt]
+description = "Format Go sources"
+run = "gofmt -w extensions"
+
+[tasks.lint]
+description = "Check formatting and run go vet"
+depends = ["setup"]
+# {% raw %} keeps Go's template syntax away from mise's template engine.
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+unformatted=$(gofmt -l extensions)
+if [ -n "$unformatted" ]; then
+  echo "gofmt needed (run: mise run fmt):" >&2
+  echo "$unformatted" >&2
+  exit 1
+fi
+go vet $(go list -m -f '{% raw %}{{.Dir}}{% endraw %}/...')
+'''
+
+[tasks.test]
+description = "Run Go tests of every extension (extra args go to go test)"
+depends = ["setup"]
+alias = "t"
+run = "go test $(go list -m -f '{% raw %}{{.Dir}}{% endraw %}/...')"
+
+[tasks.validate]
+description = "Build and start the extensions the way PiG loads them, without installing"
+run = "pig install --validate-only --json ."
+
+[tasks.dev]
+description = "Start PiG in this folder with the extension loaded (extra args go to pig)"
+run = "pig -e ./extensions/command-policy"
+
+[tasks.check]
+description = "Everything CI should run: lint, test, validate"
+depends = ["lint", "test", "validate"]
