@@ -55,3 +55,23 @@ Project configuration is read only after the project is trusted.
 
 `defaultProjectTrust` is read only from the global settings file
 (`~/.pig/agent/settings.json`). We do not change it here.
+
+## Development
+
+[mise](https://mise.jdx.dev/) pins the toolchain (Go, PiG) and runs the tasks
+in `mise.toml`. Go libraries are not managed by mise: they stay in each
+extension's `go.mod`, and the PiG SDK resolves to the copy PiG stages locally.
+
+```sh
+mise trust && mise install   # once per clone
+mise run setup               # generate go.work (re-run after upgrading PiG)
+mise run test                # go test; extra args pass through, e.g. `mise run test -run Evaluate -v`
+mise run check               # lint + test + validate, what CI should run
+mise run dev                 # start PiG here with this extension loaded
+```
+
+`setup` writes a git-ignored `go.work` that replaces the SDK import with PiG's
+staged SDK (`pig reload --sdk-path`), so `go build`, `go test`, and gopls work
+outside PiG. `validate` runs `pig install --validate-only`, which builds and
+starts the extension as PiG does without changing any settings. `mise tasks ls`
+lists every task.
