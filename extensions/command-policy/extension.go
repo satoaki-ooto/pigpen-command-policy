@@ -13,7 +13,9 @@
 //
 //   - a command whose program is allowlisted runs without confirmation;
 //   - a command whose program is denylisted is blocked;
-//   - anything else is confirmed interactively, and blocked when no UI exists.
+//   - anything else is confirmed interactively, and blocked when no UI exists;
+//   - a command the lexer cannot parse (unterminated quote or escape) returns
+//     an error before bash runs anything.
 //
 // The lists and the unlisted-command behavior live in
 // .pig/command-policy.json so the policy stays folder-local and editable
@@ -23,6 +25,8 @@ package command_policy
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,7 +80,11 @@ func Extension() *sdk.Extension {
 		}
 
 		p := loadPolicy(ctx.Cwd())
-		switch p.evaluate(command) {
+		v, err := p.evaluate(command)
+		if err != nil {
+			return nil, fmt.Errorf("command-policy: cannot parse command %q: %w", command, err)
+		}
+		switch v {
 		case verdictAllow:
 			return nil, nil
 		case verdictDeny:
@@ -146,62 +154,153 @@ const (
 	verdictDeny
 )
 
-// evaluate classifies a whole shell command line. If any program in the line is
-// denylisted the verdict is deny; if every program is allowlisted the verdict is
-// allow; otherwise it defers to OnUnlisted.
-func (p policy) evaluate(command string) verdict {
-	names := commandNames(command)
+// evaluate classifies a whole shell command line. The deny decision uses
+// denyCandidates, which sees through shell keywords and brace groups; the
+// allow/ask decision keeps judging commandNames, so keyword syntax itself
+// stays unlisted and allow is not widened. Malformed input (unterminated
+// quotes, incomplete escapes) is reported as an error instead of a verdict.
+func (p policy) evaluate(command string) (verdict, error) {
+	denyNames, err := denyCandidates(command)
+	if err != nil {
+		return verdictAllow, err
+	}
+	for _, name := range denyNames {
+		if contains(p.Deny, name) {
+			return verdictDeny, nil
+		}
+	}
+	names, err := commandNames(command)
+	if err != nil {
+		return verdictAllow, err
+	}
 	if len(names) == 0 {
-		return verdictAllow
+		return verdictAllow, nil
 	}
 	unlisted := false
 	for _, name := range names {
 		if contains(p.Deny, name) {
-			return verdictDeny
+			return verdictDeny, nil
 		}
 		if !contains(p.Allow, name) {
 			unlisted = true
 		}
 	}
 	if !unlisted {
-		return verdictAllow
+		return verdictAllow, nil
 	}
 	switch p.OnUnlisted {
 	case "allow":
-		return verdictAllow
+		return verdictAllow, nil
 	case "deny":
-		return verdictDeny
+		return verdictDeny, nil
 	default:
-		return verdictAsk
+		return verdictAsk, nil
 	}
+}
+
+// shellKeywords are segment-leading reserved words and brace characters that
+// are shell syntax rather than programs. `in` is not listed: it belongs to a
+// `for` header, which denyCandidates skips together with the loop variable and
+// the word list.
+var shellKeywords = map[string]bool{
+	"if":    true,
+	"then":  true,
+	"elif":  true,
+	"else":  true,
+	"fi":    true,
+	"for":   true,
+	"while": true,
+	"until": true,
+	"do":    true,
+	"done":  true,
+	"{":     true,
+	"}":     true,
+	"!":     true,
+}
+
+// denyCandidates extracts the program names a deny decision must consider.
+// Unlike commandNames it skips segment-leading shell keywords and brace
+// groups, so a denylisted program behind `if`, `for`, `while`, or `{ ... }` is
+// still found. A `for` header — the loop variable and the `in` words — is
+// shell syntax, not a command. It is a best-effort parser, not a full shell
+// grammar: `case`, functions, aliases, expansions, and here-docs are not
+// parsed.
+func denyCandidates(command string) ([]string, error) {
+	segments, err := splitSegments(command)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, segment := range segments {
+		words, err := splitWords(segment)
+		if err != nil {
+			return nil, err
+		}
+		i := 0
+		for i < len(words) {
+			if words[i] == "for" {
+				// `for NAME [in words...]`: the loop variable and the word
+				// list are not commands, so a header ending in `in` leaves
+				// nothing to extract from this segment.
+				i += 2
+				if i < len(words) && words[i] == "in" {
+					i = len(words)
+				}
+				continue
+			}
+			if !shellKeywords[words[i]] {
+				break
+			}
+			i++
+		}
+		if name := firstName(words, i); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names, nil
 }
 
 // commandNames extracts the program name of every simple command in a shell
 // line, so that pipes, lists, subshells, and command substitutions are all
 // inspected. It is a best-effort parser, not a full shell grammar.
-func commandNames(command string) []string {
+func commandNames(command string) ([]string, error) {
+	segments, err := splitSegments(command)
+	if err != nil {
+		return nil, err
+	}
 	var names []string
-	for _, segment := range splitSegments(command) {
-		words := splitWords(segment)
-		i := 0
-		for i < len(words) && isAssignment(words[i]) {
-			i++
+	for _, segment := range segments {
+		words, err := splitWords(segment)
+		if err != nil {
+			return nil, err
 		}
-		for i < len(words) && transparentWrappers[words[i]] {
-			i++
-		}
-		if i < len(words) {
-			if name := commandName(words[i]); name != "" {
-				names = append(names, name)
-			}
+		if name := firstName(words, 0); name != "" {
+			names = append(names, name)
 		}
 	}
-	return names
+	return names, nil
+}
+
+// firstName returns the program name of the first command word at or after
+// start, skipping leading assignments and transparent wrappers.
+func firstName(words []string, start int) string {
+	i := start
+	for i < len(words) && isAssignment(words[i]) {
+		i++
+	}
+	for i < len(words) && transparentWrappers[words[i]] {
+		i++
+	}
+	if i >= len(words) {
+		return ""
+	}
+	return commandName(words[i])
 }
 
 // splitSegments breaks a command line at unquoted control operators. `&` is a
-// separator unless it belongs to a redirection such as 2>&1.
-func splitSegments(command string) []string {
+// separator unless it belongs to a redirection such as 2>&1. Unterminated
+// quotes and incomplete backslash escapes are lexical errors, not segments.
+func splitSegments(command string) ([]string, error) {
 	var (
 		segments []string
 		b        strings.Builder
@@ -250,13 +349,20 @@ func splitSegments(command string) []string {
 		}
 		prev = r
 	}
+	if quote != 0 {
+		return nil, fmt.Errorf("unterminated %c quote", quote)
+	}
+	if escaped {
+		return nil, errors.New("incomplete backslash escape")
+	}
 	flush()
-	return segments
+	return segments, nil
 }
 
 // splitWords tokenizes one segment, honoring single quotes, double quotes, and
-// backslash escapes. Quotes are removed from the resulting words.
-func splitWords(segment string) []string {
+// backslash escapes. Quotes are removed from the resulting words. Unterminated
+// quotes and incomplete backslash escapes are lexical errors.
+func splitWords(segment string) ([]string, error) {
 	var (
 		words   []string
 		b       strings.Builder
@@ -305,8 +411,14 @@ func splitWords(segment string) []string {
 			started = true
 		}
 	}
+	if quote != 0 {
+		return nil, fmt.Errorf("unterminated %c quote", quote)
+	}
+	if escaped {
+		return nil, errors.New("incomplete backslash escape")
+	}
 	flush()
-	return words
+	return words, nil
 }
 
 // isAssignment reports whether w is a leading NAME=value environment
