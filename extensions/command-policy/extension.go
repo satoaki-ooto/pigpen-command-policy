@@ -13,11 +13,12 @@
 //
 //   - a command whose program is allowlisted runs without confirmation;
 //   - a command whose program is denylisted is blocked, including behind shell
-//     keywords and recognized wrappers (sudo, env, timeout, xargs, ...);
+//     keywords, recognized wrappers (sudo, env, timeout, xargs, ...), and the
+//     command strings of bash/sh/zsh -c and eval up to a fixed nesting depth;
 //   - anything else is confirmed interactively, and blocked when no UI exists;
-//   - a command the lexer cannot parse (unterminated quote or escape, or a
-//     wrapper prefix outside the recognized option tables) returns an error
-//     before bash runs anything.
+//   - a command the lexer cannot parse (unterminated quote or escape, a
+//     wrapper prefix outside the recognized option tables, or an ambiguous
+//     shell option sequence) returns an error before bash runs anything.
 //
 // The lists and the unlisted-command behavior live in
 // .pig/command-policy.json so the policy stays folder-local and editable
@@ -64,6 +65,27 @@ var transparentWrappers = map[string]bool{
 	"nice":    true,
 	"time":    true,
 }
+
+// nestedDepthLimit bounds the -c / eval recursion. Top-level input parses at
+// depth 0 and each nested command string one deeper, so eight nested strings
+// are analyzed and a ninth is a parse error.
+const nestedDepthLimit = 8
+
+// shellNames are the shells whose -c command string the deny path inspects,
+// matched by basename so absolute-path invocation is covered. A shell without
+// -c (bash script.sh, an interactive shell) contributes only its own name:
+// script files stay unexamined.
+var shellNames = map[string]bool{
+	"bash": true,
+	"sh":   true,
+	"zsh":  true,
+}
+
+// shellFlagChars lists the single-letter shell options that take no operand
+// and do not move the -c command string, so the option scan can skip them.
+// Anything outside the list is a parse error; -o takes its operand separately
+// and is handled by scanShellCommandString itself.
+const shellFlagChars = "abdefghiklmnoprstuvxBCDEHPT"
 
 func Extension() *sdk.Extension {
 	e := sdk.New("command-policy")
@@ -223,15 +245,27 @@ var shellKeywords = map[string]bool{
 	"!":     true,
 }
 
-// denyCandidates extracts the program names a deny decision must consider.
+// denyCandidates extracts the program names a deny decision must consider at
+// the top level, depth 0 of the -c / eval recursion.
+func denyCandidates(command string) ([]string, error) {
+	return denyCandidatesAt(command, 0)
+}
+
+// denyCandidatesAt extracts the program names a deny decision must consider.
 // Unlike commandNames it skips segment-leading shell keywords and brace
 // groups, so a denylisted program behind `if`, `for`, `while`, or `{ ... }` is
 // still found, and it walks recognized wrapper prefixes (sudo, env, xargs,
 // ...) with their options, contributing both the wrapper names — the
 // unstripped form — and the effective command behind them — the stripped
-// form. It is a best-effort parser, not a full shell grammar: `case`,
-// functions, aliases, expansions, redirects, and here-docs are not parsed.
-func denyCandidates(command string) ([]string, error) {
+// form. The command string of bash/sh/zsh -c and the joined arguments of eval
+// are inspected recursively with the same machinery, bounded by
+// nestedDepthLimit. It is a best-effort parser, not a full shell grammar:
+// `case`, functions, aliases, expansions, redirects, and here-docs are not
+// parsed.
+func denyCandidatesAt(command string, depth int) ([]string, error) {
+	if depth > nestedDepthLimit {
+		return nil, fmt.Errorf("command nesting exceeds depth %d", nestedDepthLimit)
+	}
 	segments, err := splitSegments(command)
 	if err != nil {
 		return nil, err
@@ -242,7 +276,7 @@ func denyCandidates(command string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		candidates, err := wrapperCandidates(words[skipShellKeywords(words):])
+		candidates, err := wrapperCandidates(words[skipShellKeywords(words):], depth)
 		if err != nil {
 			return nil, err
 		}
@@ -326,11 +360,13 @@ var wrapperSpecs = map[string]wrapperSpec{
 // wrapperCandidates extracts the deny candidates for one segment's words after
 // shell keywords: every wrapper name in the invocation plus the effective
 // command behind the wrappers, so `env ls` matches both `env` and `ls` and
-// `sudo env ls` matches all three. Wrapper options must be covered by
-// wrapperSpecs; unknown or incomplete prefixes are errors, which stop the
-// tool_call before bash runs. With no explicit utility xargs runs echo, so a
-// bare `xargs` yields echo as its effective command.
-func wrapperCandidates(words []string) ([]string, error) {
+// `sudo env ls` matches all three. When the effective command is a shell, its
+// -c command string is inspected recursively; when it is eval, the joined
+// arguments are. Wrapper and shell options must be covered by their tables;
+// unknown or incomplete prefixes are errors, which stop the tool_call before
+// bash runs. With no explicit utility xargs runs echo, so a bare `xargs`
+// yields echo as its effective command.
+func wrapperCandidates(words []string, depth int) ([]string, error) {
 	i := 0
 	for i < len(words) && isAssignment(words[i]) {
 		i++
@@ -338,6 +374,25 @@ func wrapperCandidates(words []string) ([]string, error) {
 	var names []string
 	for i < len(words) {
 		base := commandName(words[i])
+		if base == "eval" {
+			// eval concatenates its arguments with single spaces and runs the
+			// result as shell input, so the joined string re-enters the same
+			// extraction. Empty eval runs nothing and is not malformed.
+			names = append(names, base)
+			nested, err := denyCandidatesAt(strings.Join(words[i+1:], " "), depth+1)
+			if err != nil {
+				return nil, err
+			}
+			return append(names, nested...), nil
+		}
+		if shellNames[base] {
+			names = append(names, base)
+			nested, err := shellNestedCandidates(words[i+1:], depth)
+			if err != nil {
+				return nil, err
+			}
+			return append(names, nested...), nil
+		}
 		if _, ok := wrapperSpecs[base]; !ok {
 			break
 		}
@@ -374,6 +429,75 @@ func wrapperCandidates(words []string) ([]string, error) {
 		names = append(names, commandName(words[i]))
 	}
 	return names, nil
+}
+
+// shellNestedCandidates inspects the command string of a shell invocation's
+// -c option recursively. Words after the command string are positional
+// parameters, not programs. An invocation without -c — a script file or an
+// interactive shell — contributes nothing beyond the shell name itself.
+func shellNestedCandidates(args []string, depth int) ([]string, error) {
+	idx, err := scanShellCommandString(args)
+	if err != nil {
+		return nil, err
+	}
+	if idx < 0 {
+		return nil, nil
+	}
+	return denyCandidatesAt(args[idx], depth+1)
+}
+
+// scanShellCommandString walks the option prefix of a shell invocation's
+// arguments and returns the index of the -c command string: -1 when the
+// invocation has no -c (options ended at -- or at the first non-option word),
+// -2 when it stops informationally (--help / --version). Unknown options,
+// plus options, long options other than --help/--version, -c anywhere but the
+// end of its cluster, and missing operands are errors, so the command string
+// is never guessed.
+func scanShellCommandString(args []string) (int, error) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			return -1, nil
+		case a == "--help" || a == "--version":
+			return -2, nil
+		case strings.HasPrefix(a, "--"), strings.HasPrefix(a, "+"):
+			return 0, fmt.Errorf("unsupported shell option %q", a)
+		case len(a) > 1 && a[0] == '-':
+			cluster := a[1:]
+			for j := 0; j < len(cluster); j++ {
+				switch c := cluster[j]; {
+				case c == 'c':
+					// A -c inside the cluster would turn the remaining
+					// characters into the command string (bash -cx runs "x"),
+					// so only a trailing -c has its operand in the next word.
+					if j != len(cluster)-1 {
+						return 0, fmt.Errorf("ambiguous shell option cluster %q: -c must end the cluster", a)
+					}
+					if i+1 >= len(args) {
+						return 0, errors.New("shell -c is missing its command string")
+					}
+					return i + 1, nil
+				case c == 'o':
+					if j < len(cluster)-1 {
+						j = len(cluster) - 1 // attached operand consumes the rest
+					} else {
+						if i+1 >= len(args) {
+							return 0, errors.New("shell option -o is missing its operand")
+						}
+						i++
+					}
+				case strings.IndexByte(shellFlagChars, c) >= 0:
+					// Flagless option: keep scanning the cluster.
+				default:
+					return 0, fmt.Errorf("unsupported shell option %q", a)
+				}
+			}
+		default:
+			return -1, nil
+		}
+	}
+	return -1, nil
 }
 
 // scanWrapperOptions walks the option prefix of the wrapper named name whose
@@ -513,6 +637,15 @@ func splitSegments(command string) ([]string, error) {
 			continue
 		}
 		if quote != 0 {
+			// Inside double quotes \" must not close the quote. The backslash
+			// stays in the buffer so splitWords — which owns quote removal —
+			// sees the same escape; only the separator scan skips it.
+			if quote == '"' && r == '\\' {
+				b.WriteRune(r)
+				escaped = true
+				prev = r
+				continue
+			}
 			if r == quote {
 				quote = 0
 			}
