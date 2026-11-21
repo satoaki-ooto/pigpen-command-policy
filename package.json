@@ -1,0 +1,10 @@
+{
+  "name": "pigpen-command-policy",
+  "version": "0.1.0",
+  "description": "Allow/deny/confirm policy extension for PiG bash tool calls",
+  "pi": {
+    "extensions": [
+      "extensions/command-policy"
+    ]
+  }
+}
