@@ -2,6 +2,7 @@ package command_policy
 
 import (
 	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -449,6 +450,243 @@ func TestDenyCandidatesWrapperErrors(t *testing.T) {
 	for _, command := range cases {
 		if got, err := denyCandidates(command); err == nil {
 			t.Errorf("denyCandidates(%q) = %v, want parse error", command, got)
+		}
+	}
+}
+
+// Issue #12 reproduction row plus equivalent shell and eval cases: the deny
+// lookup must reach the program inside the command string of bash/sh/zsh -c
+// and of eval, behind wrappers and keywords, under every onUnlisted setting.
+func TestEvaluateNestedShellsDeny(t *testing.T) {
+	cases := []string{
+		"bash -c 'echo hi'",
+		"sh -c 'printenv'",
+		"zsh -c 'echo hi'",
+		"/bin/bash -c 'echo hi'",
+		"/usr/bin/zsh -c 'echo hi'",
+		// Without quotes the command string is only the next word; hi is $0.
+		"bash -c echo hi",
+		"eval 'echo hi'",
+		"eval echo hi",
+		"eval 'echo' 'hi'",
+		"sudo bash -c 'nice -n 5 echo hi'",
+		"env bash -c 'echo hi'",
+		"timeout 5 sh -c 'printenv'",
+		"xargs bash -c 'echo hi'",
+		"command bash -c 'echo hi'",
+		"FOO=1 bash -c 'echo hi'",
+		"if true; then bash -c 'echo hi'; fi",
+		"bash -c 'bash -c \"echo hi\"'",
+		"bash -c 'cat $(printenv HOME)'",
+		"bash -xc 'echo hi'",
+		"bash -lc 'echo hi'",
+		"bash -li -c 'echo hi'",
+		"bash -o errexit -c 'echo hi'",
+	}
+	for _, onUnlisted := range []string{"ask", "allow", "deny"} {
+		p := defaultPolicy
+		p.OnUnlisted = onUnlisted
+		for _, command := range cases {
+			got, err := p.evaluate(command)
+			if err != nil {
+				t.Errorf("evaluate(%q) returned error: %v", command, err)
+				continue
+			}
+			if got != verdictDeny {
+				t.Errorf("evaluate(%q) with onUnlisted %q = %v, want deny", command, onUnlisted, got)
+			}
+		}
+	}
+}
+
+// Nested inspection is deny-only: an allowed nested command must not widen
+// the verdict, the outer shell or eval stays judged by its own name, and
+// forms that execute nothing nested keep their outer flow. With
+// onUnlisted "allow" the outer unlisted shell behaves as before the feature.
+func TestEvaluateNestedShellsPreserveNonDeny(t *testing.T) {
+	defaultCases := []struct {
+		command string
+		want    verdict
+	}{
+		{"bash -c 'ls'", verdictAsk},
+		{"eval 'ls'", verdictAsk},
+		{"bash -c 'git push'", verdictAsk},
+		{"eval 'git status'", verdictAsk},
+		{"bash", verdictAsk},
+		{"sh", verdictAsk},
+		{"zsh", verdictAsk},
+		{"eval", verdictAsk},
+		// Script files stay unexamined in Stage 1.
+		{"bash script.sh", verdictAsk},
+		{"/bin/bash /tmp/x.sh", verdictAsk},
+		// Informational forms execute nothing nested, so echo never runs.
+		{"bash --version", verdictAsk},
+		{"bash --version -c 'echo hi'", verdictAsk},
+		// Empty command strings and bare eval run nothing and are not errors.
+		{"bash -c ''", verdictAsk},
+		{"eval ''", verdictAsk},
+		// Operands after the command string are positional parameters.
+		{"bash -c 'ls' arg0 arg1", verdictAsk},
+	}
+	for _, c := range defaultCases {
+		got, err := defaultPolicy.evaluate(c.command)
+		if err != nil {
+			t.Errorf("evaluate(%q) returned error: %v", c.command, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("evaluate(%q) = %v, want %v", c.command, got, c.want)
+		}
+	}
+
+	p := defaultPolicy
+	p.OnUnlisted = "allow"
+	allowCases := []struct {
+		command string
+		want    verdict
+	}{
+		{"bash -c 'ls'", verdictAllow},
+		{"eval 'ls'", verdictAllow},
+	}
+	for _, c := range allowCases {
+		got, err := p.evaluate(c.command)
+		if err != nil {
+			t.Errorf("evaluate(%q) returned error: %v", c.command, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("evaluate(%q) with onUnlisted allow = %v, want %v", c.command, got, c.want)
+		}
+	}
+}
+
+// Missing -c command strings, malformed nested quoting or escaping, and
+// ambiguous or unsupported shell option sequences are parse errors, so the
+// tool_call stops before bash interprets the nested string itself.
+func TestEvaluateNestedParseErrors(t *testing.T) {
+	cases := []string{
+		"bash -c",
+		"sh -c",
+		"zsh -c",
+		"sudo bash -c",
+		"bash -c 'echo \"hi'",
+		"eval 'echo \"hi'",
+		"bash -c 'echo \\'",
+		"bash -cx 'echo hi'",
+		"bash -Q -c 'echo hi'",
+		"bash --rcfile f -c 'echo hi'",
+		"bash +x -c 'echo hi'",
+		"bash -o",
+	}
+	for _, command := range cases {
+		if got, err := defaultPolicy.evaluate(command); err == nil {
+			t.Errorf("evaluate(%q) = %v, want parse error", command, got)
+		}
+	}
+}
+
+func TestDenyCandidatesNested(t *testing.T) {
+	cases := []struct {
+		command string
+		want    []string
+	}{
+		{"bash -c 'echo hi'", []string{"bash", "echo"}},
+		{"sh -c 'printenv'", []string{"sh", "printenv"}},
+		{"zsh -c 'echo hi'", []string{"zsh", "echo"}},
+		{"/bin/bash -c 'echo hi'", []string{"bash", "echo"}},
+		{"bash -c echo hi", []string{"bash", "echo"}},
+		{"eval 'echo hi'", []string{"eval", "echo"}},
+		// eval joins its arguments with single spaces before judging them.
+		{"eval echo hi", []string{"eval", "echo"}},
+		{"eval 'echo' 'hi'", []string{"eval", "echo"}},
+		{"eval 'echo' ';printenv'", []string{"eval", "echo", "printenv"}},
+		{"eval", []string{"eval"}},
+		{"eval ''", []string{"eval"}},
+		{"bash", []string{"bash"}},
+		{"bash script.sh", []string{"bash"}},
+		{"bash -li", []string{"bash"}},
+		{"bash -c ''", []string{"bash"}},
+		{"bash -c 'ls' arg0 arg1", []string{"bash", "ls"}},
+		{"sudo bash -c 'nice -n 5 echo hi'", []string{"sudo", "bash", "nice", "echo"}},
+		{"env bash -c 'echo hi'", []string{"env", "bash", "echo"}},
+		{"xargs bash -c 'echo hi'", []string{"xargs", "bash", "echo"}},
+		{"timeout 5 sh -c 'printenv'", []string{"timeout", "sh", "printenv"}},
+		{"command bash -c 'echo hi'", []string{"command", "bash", "echo"}},
+		{"FOO=1 bash -c 'echo hi'", []string{"bash", "echo"}},
+		{"bash -c 'if true; then printenv; fi'", []string{"bash", "true", "printenv"}},
+		{"bash -c 'cat $(printenv HOME)'", []string{"bash", "cat", "printenv"}},
+		{"bash -c 'exec printenv'", []string{"bash", "exec", "printenv"}},
+		{"bash -c 'env ls'", []string{"bash", "env", "ls"}},
+		{"bash --version", []string{"bash"}},
+		{"bash --version -c 'echo hi'", []string{"bash"}},
+	}
+	for _, c := range cases {
+		got, err := denyCandidates(c.command)
+		if err != nil {
+			t.Errorf("denyCandidates(%q) returned error: %v", c.command, err)
+			continue
+		}
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("denyCandidates(%q) = %v, want %v", c.command, got, c.want)
+		}
+	}
+}
+
+func TestDenyCandidatesNestedErrors(t *testing.T) {
+	cases := []string{
+		"bash -c",
+		"sh -c",
+		"zsh -c",
+		"sudo bash -c",
+		"bash -c 'echo \"hi'",
+		"eval 'echo \"hi'",
+		"bash -c 'echo \\'",
+		"bash -cx 'echo hi'",
+		"bash -Q -c 'echo hi'",
+		"bash --rcfile f -c 'echo hi'",
+		"bash +x -c 'echo hi'",
+		"bash -o",
+	}
+	for _, command := range cases {
+		if got, err := denyCandidates(command); err == nil {
+			t.Errorf("denyCandidates(%q) = %v, want parse error", command, got)
+		}
+	}
+}
+
+// Eight nested -c / eval command strings are analyzed; the ninth is a parse
+// error instead of an unbounded recursion.
+func TestEvaluateNestedDepthLimit(t *testing.T) {
+	wraps := []struct {
+		name string
+		wrap func(string) string
+	}{
+		{"eval", func(s string) string { return "eval " + s }},
+		{"bash -c", func(s string) string { return "bash -c " + strconv.Quote(s) }},
+	}
+	for _, w := range wraps {
+		for n := 1; n <= nestedDepthLimit; n++ {
+			cmd := "printenv"
+			for i := 0; i < n; i++ {
+				cmd = w.wrap(cmd)
+			}
+			got, err := defaultPolicy.evaluate(cmd)
+			if err != nil {
+				t.Errorf("evaluate(%s nested %d) returned error: %v", w.name, n, err)
+				continue
+			}
+			if got != verdictDeny {
+				t.Errorf("evaluate(%s nested %d) = %v, want deny", w.name, n, got)
+			}
+		}
+		for _, n := range []int{nestedDepthLimit + 1, nestedDepthLimit + 2} {
+			cmd := "printenv"
+			for i := 0; i < n; i++ {
+				cmd = w.wrap(cmd)
+			}
+			if got, err := defaultPolicy.evaluate(cmd); err == nil {
+				t.Errorf("evaluate(%s nested %d) = %v, want parse error", w.name, n, got)
+			}
 		}
 	}
 }
