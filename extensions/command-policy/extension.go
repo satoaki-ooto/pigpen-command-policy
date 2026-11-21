@@ -12,10 +12,12 @@
 // Devin's Exec) and applies three outcomes:
 //
 //   - a command whose program is allowlisted runs without confirmation;
-//   - a command whose program is denylisted is blocked;
+//   - a command whose program is denylisted is blocked, including behind shell
+//     keywords and recognized wrappers (sudo, env, timeout, xargs, ...);
 //   - anything else is confirmed interactively, and blocked when no UI exists;
-//   - a command the lexer cannot parse (unterminated quote or escape) returns
-//     an error before bash runs anything.
+//   - a command the lexer cannot parse (unterminated quote or escape, or a
+//     wrapper prefix outside the recognized option tables) returns an error
+//     before bash runs anything.
 //
 // The lists and the unlisted-command behavior live in
 // .pig/command-policy.json so the policy stays folder-local and editable
@@ -50,8 +52,10 @@ type policy struct {
 }
 
 // transparentWrappers are leading words that re-dispatch to the command that
-// follows, so the policy must inspect the word after them. `env` is
-// deliberately absent: it is a denylisted program in its own right.
+// follows, so the allow/ask path (firstName) inspects the word after them
+// unchanged. The deny path instead walks the fuller wrapperSpecs table with
+// option parsing. `env` is deliberately absent: it is a denylisted program in
+// its own right.
 var transparentWrappers = map[string]bool{
 	"command": true,
 	"builtin": true,
@@ -155,10 +159,11 @@ const (
 )
 
 // evaluate classifies a whole shell command line. The deny decision uses
-// denyCandidates, which sees through shell keywords and brace groups; the
-// allow/ask decision keeps judging commandNames, so keyword syntax itself
-// stays unlisted and allow is not widened. Malformed input (unterminated
-// quotes, incomplete escapes) is reported as an error instead of a verdict.
+// denyCandidates, which sees through shell keywords, brace groups, and
+// recognized wrapper prefixes; the allow/ask decision keeps judging
+// commandNames, so keyword and wrapper syntax itself stays unlisted and allow
+// is not widened. Malformed input (unterminated quotes, incomplete escapes,
+// unrecognized wrapper options) is reported as an error instead of a verdict.
 func (p policy) evaluate(command string) (verdict, error) {
 	denyNames, err := denyCandidates(command)
 	if err != nil {
@@ -221,10 +226,11 @@ var shellKeywords = map[string]bool{
 // denyCandidates extracts the program names a deny decision must consider.
 // Unlike commandNames it skips segment-leading shell keywords and brace
 // groups, so a denylisted program behind `if`, `for`, `while`, or `{ ... }` is
-// still found. A `for` header — the loop variable and the `in` words — is
-// shell syntax, not a command. It is a best-effort parser, not a full shell
-// grammar: `case`, functions, aliases, expansions, and here-docs are not
-// parsed.
+// still found, and it walks recognized wrapper prefixes (sudo, env, xargs,
+// ...) with their options, contributing both the wrapper names — the
+// unstripped form — and the effective command behind them — the stripped
+// form. It is a best-effort parser, not a full shell grammar: `case`,
+// functions, aliases, expansions, redirects, and here-docs are not parsed.
 func denyCandidates(command string) ([]string, error) {
 	segments, err := splitSegments(command)
 	if err != nil {
@@ -236,28 +242,213 @@ func denyCandidates(command string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		i := 0
-		for i < len(words) {
-			if words[i] == "for" {
-				// `for NAME [in words...]`: the loop variable and the word
-				// list are not commands, so a header ending in `in` leaves
-				// nothing to extract from this segment.
-				i += 2
-				if i < len(words) && words[i] == "in" {
-					i = len(words)
-				}
-				continue
-			}
-			if !shellKeywords[words[i]] {
-				break
-			}
-			i++
+		candidates, err := wrapperCandidates(words[skipShellKeywords(words):])
+		if err != nil {
+			return nil, err
 		}
-		if name := firstName(words, i); name != "" {
-			names = append(names, name)
-		}
+		names = append(names, candidates...)
 	}
 	return names, nil
+}
+
+// skipShellKeywords returns the index of the first word of a segment that is
+// not segment-leading shell syntax: reserved words, brace characters, and the
+// `for NAME [in words...]` header.
+func skipShellKeywords(words []string) int {
+	i := 0
+	for i < len(words) {
+		if words[i] == "for" {
+			// `for NAME [in words...]`: the loop variable and the word list
+			// are not commands, so a header ending in `in` leaves nothing to
+			// extract from this segment.
+			i += 2
+			if i < len(words) && words[i] == "in" {
+				return len(words)
+			}
+			continue
+		}
+		if !shellKeywords[words[i]] {
+			break
+		}
+		i++
+	}
+	// A `for` header cut short by the segment end can leave i past the last
+	// word; nothing is extractable there.
+	return min(i, len(words))
+}
+
+// wrapperSpec lists the option forms one wrapper accepts before the command it
+// runs. Anything outside the spec is a parse error, so an option that might
+// consume the apparent command name is never skipped speculatively.
+type wrapperSpec struct {
+	flagChars  string          // flagless short options, e.g. "p" for -p
+	valueChars string          // short options that take a separate operand
+	longFlags  map[string]bool // flagless --name forms
+	longValues map[string]bool // --name=VALUE forms; the '=' is required
+}
+
+// wrapperSpecs covers every wrapper Stage 1 recognizes, matched by basename so
+// absolute-path invocation works. `env` is included so `env ls` keeps matching
+// the wrapper itself; the others dispatch to the command that follows.
+var wrapperSpecs = map[string]wrapperSpec{
+	"command": {flagChars: "p"},
+	"builtin": {},
+	"nohup":   {},
+	"exec":    {flagChars: "cl", valueChars: "a"},
+	"nice":    {valueChars: "n", longValues: map[string]bool{"adjustment": true}},
+	"time":    {flagChars: "p"},
+	"sudo":    {flagChars: "nHESbP", valueChars: "ughpDRT"},
+	"doas":    {flagChars: "n", valueChars: "uC"},
+	"env": {
+		flagChars:  "i0",
+		valueChars: "uC",
+		longFlags:  map[string]bool{"ignore-environment": true, "null": true},
+		longValues: map[string]bool{"unset": true, "chdir": true},
+	},
+	"timeout": {
+		valueChars: "ks",
+		longFlags:  map[string]bool{"preserve-status": true, "foreground": true},
+		longValues: map[string]bool{"kill-after": true, "signal": true},
+	},
+	"xargs": {
+		flagChars:  "0prt",
+		valueChars: "nILPsda",
+		longFlags: map[string]bool{
+			"null": true, "no-run-if-empty": true, "interactive": true, "verbose": true,
+		},
+		longValues: map[string]bool{
+			"max-args": true, "replace": true, "max-lines": true, "max-procs": true,
+			"max-chars": true, "delimiter": true, "arg-file": true,
+		},
+	},
+}
+
+// wrapperCandidates extracts the deny candidates for one segment's words after
+// shell keywords: every wrapper name in the invocation plus the effective
+// command behind the wrappers, so `env ls` matches both `env` and `ls` and
+// `sudo env ls` matches all three. Wrapper options must be covered by
+// wrapperSpecs; unknown or incomplete prefixes are errors, which stop the
+// tool_call before bash runs. With no explicit utility xargs runs echo, so a
+// bare `xargs` yields echo as its effective command.
+func wrapperCandidates(words []string) ([]string, error) {
+	i := 0
+	for i < len(words) && isAssignment(words[i]) {
+		i++
+	}
+	var names []string
+	for i < len(words) {
+		base := commandName(words[i])
+		if _, ok := wrapperSpecs[base]; !ok {
+			break
+		}
+		names = append(names, base)
+		next, err := scanWrapperOptions(base, words, i+1)
+		if err != nil {
+			return nil, err
+		}
+		if next < 0 {
+			return names, nil // informational form: nothing executes behind it
+		}
+		if base == "timeout" {
+			// The first word after the options is the required duration; the
+			// command follows it.
+			if next >= len(words) {
+				return nil, errors.New("timeout is missing its duration")
+			}
+			next++
+			if next >= len(words) {
+				return nil, errors.New("timeout is missing its command")
+			}
+		}
+		if next >= len(words) || (base == "xargs" && isRedirectWord(words[next])) {
+			// The wrapper has no utility behind it — except a bare xargs,
+			// whose implicit utility is echo even with a redirect in the way.
+			if base == "xargs" {
+				names = append(names, "echo")
+			}
+			return names, nil
+		}
+		i = next
+	}
+	if i < len(words) {
+		names = append(names, commandName(words[i]))
+	}
+	return names, nil
+}
+
+// scanWrapperOptions walks the option prefix of the wrapper named name whose
+// command word sits at words[start-1]. It returns the index of the first word
+// that is not an option of the wrapper, or -1 when the wrapper stops
+// informationally (--help, --version, command -v/-V) and executes nothing
+// behind it. Unrecognized options, combined short-option clusters, and missing
+// operands are errors.
+func scanWrapperOptions(name string, words []string, start int) (int, error) {
+	spec := wrapperSpecs[name]
+	for i := start; i < len(words); i++ {
+		a := words[i]
+		switch {
+		case a == "--":
+			return i + 1, nil
+		case name == "env" && isAssignment(a):
+			// env consumes NAME=value assignments itself.
+		case name == "command" && (a == "-v" || a == "-V"):
+			return -1, nil
+		case name == "nice" && isNumericAdjustment(a):
+			// Legacy adjustment such as nice -5.
+		case strings.HasPrefix(a, "--"):
+			body := a[2:]
+			if body == "help" || body == "version" {
+				return -1, nil
+			}
+			if spec.longFlags[body] {
+				continue
+			}
+			if opt, _, ok := strings.Cut(body, "="); ok && spec.longValues[opt] {
+				continue
+			}
+			return 0, fmt.Errorf("unsupported option %q for %s", a, name)
+		case len(a) > 1 && a[0] == '-':
+			if len(a) > 2 {
+				return 0, fmt.Errorf("unsupported combined option %q for %s", a, name)
+			}
+			switch {
+			case strings.ContainsRune(spec.flagChars, rune(a[1])):
+			case strings.ContainsRune(spec.valueChars, rune(a[1])):
+				if i+1 >= len(words) {
+					return 0, fmt.Errorf("option %q of %s is missing its operand", a, name)
+				}
+				i++
+			default:
+				return 0, fmt.Errorf("unsupported option %q for %s", a, name)
+			}
+		default:
+			return i, nil
+		}
+	}
+	return len(words), nil
+}
+
+// isNumericAdjustment reports whether w is nice's legacy adjustment form, a
+// bare `-` followed by digits such as -5.
+func isNumericAdjustment(w string) bool {
+	if len(w) < 2 || w[0] != '-' || w[1] == '-' {
+		return false
+	}
+	for _, r := range w[1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isRedirectWord reports whether w is a redirect word such as <, >, 2>, or
+// >/dev/null, which can occupy the utility slot of a bare xargs. splitWords
+// only keeps < and > inside a word when they were quoted or escaped, so any
+// such word there is a redirect; erring toward deny is safe for a quoted
+// utility name.
+func isRedirectWord(w string) bool {
+	return strings.ContainsAny(w, "<>")
 }
 
 // commandNames extracts the program name of every simple command in a shell
