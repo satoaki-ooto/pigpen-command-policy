@@ -94,6 +94,7 @@ func TestEvaluateShellKeywordsNoFalseDeny(t *testing.T) {
 		{"while ls; do wc; done", verdictAsk},
 		{"{ ls; }", verdictAsk},
 		{"! ls", verdictAsk},
+		{"ls | for", verdictAsk},
 	}
 	for _, c := range cases {
 		got, err := defaultPolicy.evaluate(c.command)
@@ -164,6 +165,11 @@ func TestDenyCandidates(t *testing.T) {
 		{"for i in echo printenv; do ls; done", []string{"ls"}},
 		{"{ echo hi; }", []string{"echo"}},
 		{"! echo hi", []string{"echo"}},
+		// A `for` header cut short by the segment end must not push the
+		// candidate index past the last word.
+		{"for", nil},
+		{"for x", nil},
+		{"ls | for", []string{"ls"}},
 	}
 	for _, c := range cases {
 		got, err := denyCandidates(c.command)
@@ -260,6 +266,8 @@ func TestEvaluateWrapperFamiliesDeny(t *testing.T) {
 		"xargs",
 		"xargs -r",
 		"xargs < f",
+		"xargs >/dev/null",
+		"xargs 2>&1",
 		"/usr/bin/sudo echo hi",
 		"/usr/bin/env printenv",
 		"/usr/bin/xargs echo hi",
@@ -397,6 +405,8 @@ func TestDenyCandidatesWrappers(t *testing.T) {
 		{"xargs", []string{"xargs", "echo"}},
 		{"xargs -0", []string{"xargs", "echo"}},
 		{"xargs < f", []string{"xargs", "echo"}},
+		{"xargs >/dev/null", []string{"xargs", "echo"}},
+		{"xargs 2>&1", []string{"xargs", "echo"}},
 		{"xargs echo < f", []string{"xargs", "echo"}},
 		{"sudo env ls", []string{"sudo", "env", "ls"}},
 		{"nohup env", []string{"nohup", "env"}},

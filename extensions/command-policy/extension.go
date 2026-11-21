@@ -272,7 +272,9 @@ func skipShellKeywords(words []string) int {
 		}
 		i++
 	}
-	return i
+	// A `for` header cut short by the segment end can leave i past the last
+	// word; nothing is extractable there.
+	return min(i, len(words))
 }
 
 // wrapperSpec lists the option forms one wrapper accepts before the command it
@@ -440,22 +442,13 @@ func isNumericAdjustment(w string) bool {
 	return true
 }
 
-// isRedirectWord reports whether w is a redirect operator word such as <, >,
-// >>, 2>, or 2>&1, which can occupy the utility slot of a bare xargs.
+// isRedirectWord reports whether w is a redirect word such as <, >, 2>, or
+// >/dev/null, which can occupy the utility slot of a bare xargs. splitWords
+// only keeps < and > inside a word when they were quoted or escaped, so any
+// such word there is a redirect; erring toward deny is safe for a quoted
+// utility name.
 func isRedirectWord(w string) bool {
-	if !strings.ContainsAny(w, "<>") {
-		return false
-	}
-	for _, r := range w {
-		switch {
-		case r == '<' || r == '>' || r == '&':
-		case r >= '0' && r <= '9':
-		case r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z':
-		default:
-			return false
-		}
-	}
-	return true
+	return strings.ContainsAny(w, "<>")
 }
 
 // commandNames extracts the program name of every simple command in a shell
