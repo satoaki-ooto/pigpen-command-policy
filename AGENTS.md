@@ -14,18 +14,25 @@ Work is tracked in one milestone, split into six stages. Each stage is one issue
 - Issues: #3 (Stage 1) to #8 (Stage 6)
 - Branches (created from `main` and linked to the issues):
 
-| Issue | Stage | Branch | Depends on |
-| --- | --- | --- | --- |
-| #3 | 1. Close deny bypass in command parsing | `fix/command-policy-stage-1-deny-bypass` | none |
-| #4 | 2. Do not read project config in untrusted projects | `fix/command-policy-stage-2-untrusted-project` | none |
-| #5 | 3. Judge commands by rule format | `feat/command-policy-stage-3-rule-format` | 1, 2 |
-| #6 | 4. Self-test rules and warn on config errors | `feat/command-policy-stage-4-rule-self-test` | 3 |
-| #7 | 5. Layer user config with protected built-in deny rules | `feat/command-policy-stage-5-user-config` | 3, 4 |
-| #8 | 6. Add `/command-policy check` and status commands | `feat/command-policy-stage-6-slash-commands` | 3, 4, 5 |
+| Issue | Stage | Branch | Depends on | Status |
+| --- | --- | --- | --- | --- |
+| #3 | 1. Close deny bypass in command parsing | `fix/command-policy-stage-1-deny-bypass` | none | Done (PR #16) |
+| #4 | 2. Do not read project config in untrusted projects | `fix/command-policy-stage-2-untrusted-project` | none | Open |
+| #5 | 3. Judge commands by rule format | `feat/command-policy-stage-3-rule-format` | 1, 2 | Open |
+| #6 | 4. Self-test rules and warn on config errors | `feat/command-policy-stage-4-rule-self-test` | 3 | Open |
+| #7 | 5. Layer user config with protected built-in deny rules | `feat/command-policy-stage-5-user-config` | 3, 4 | Open |
+| #8 | 6. Add `/command-policy check` and status commands | `feat/command-policy-stage-6-slash-commands` | 3, 4, 5 | Open |
 
 Work on the issue's branch only. One PR per issue; the PR should close its issue. Do not combine stages.
 
-The full design is not in the repository (the design document lives in an untracked `docs.local/` folder). The issue bodies are self-contained and are the source of truth for each stage. The settled decisions are summarized below so they are not re-opened by accident.
+The full design, specifications, and stage tasks live in the repository under OpenSpec (`openspec/changes/command-policy-permission-rules/`):
+
+- `proposal.md`: motivation, scope, and capability list
+- `design.md`: architecture, Decisions 1–7 (including layering/trust), and the 11-wrapper syntax table
+- `specs/<capability>/spec.md`: normative requirements and verifiable scenarios
+- `tasks.md`: stage-by-stage checklist mapped to Issues #3–#8
+
+GitHub Milestone #1 and Issues #4–#8 act as slim progress/dependency ledgers referencing these OpenSpec files. The settled decisions are summarized below so they are not re-opened by accident.
 
 ### Settled decisions
 
