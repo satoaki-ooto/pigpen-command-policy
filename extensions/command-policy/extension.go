@@ -91,7 +91,8 @@ func Extension() *sdk.Extension {
 	e := sdk.New("command-policy")
 
 	e.OnSessionStart(func(ctx sdk.Context, _ map[string]any) (any, error) {
-		p := loadPolicy(ctx.Cwd())
+		trusted, trustErr := ctx.IsProjectTrusted()
+		p := policyFor(ctx.Cwd(), trusted, trustErr)
 		ctx.SetStatus("command-policy", "allow="+strings.Join(p.Allow, ",")+" deny="+strings.Join(p.Deny, ","))
 		return nil, nil
 	})
@@ -105,7 +106,8 @@ func Extension() *sdk.Extension {
 			return nil, nil
 		}
 
-		p := loadPolicy(ctx.Cwd())
+		trusted, trustErr := ctx.IsProjectTrusted()
+		p := policyFor(ctx.Cwd(), trusted, trustErr)
 		v, err := p.evaluate(command)
 		if err != nil {
 			return nil, fmt.Errorf("command-policy: cannot parse command %q: %w", command, err)
@@ -142,6 +144,19 @@ func Extension() *sdk.Extension {
 	})
 
 	return e
+}
+
+// policyFor returns the policy in effect for one event. The project config
+// overlays the defaults only when the cwd is known and the workspace is
+// trusted; untrusted, a failed trust check, or an empty cwd all fall back to
+// the defaults, so a cloned repo's .pig/command-policy.json cannot take effect
+// before the user trusts the project. Trust arrives as a parameter, checked
+// fresh on every event, because it can change during a session.
+func policyFor(cwd string, trusted bool, trustErr error) policy {
+	if cwd == "" || trustErr != nil || !trusted {
+		return defaultPolicy
+	}
+	return loadPolicy(cwd)
 }
 
 // loadPolicy reads <cwd>/.pig/command-policy.json and overlays it on the

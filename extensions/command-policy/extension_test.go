@@ -1,6 +1,9 @@
 package command_policy
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"testing"
@@ -688,5 +691,52 @@ func TestEvaluateNestedDepthLimit(t *testing.T) {
 				t.Errorf("evaluate(%s nested %d) = %v, want parse error", w.name, n, got)
 			}
 		}
+	}
+}
+
+// Issue #19: the project config is read only when the cwd is known and the
+// workspace is trusted. Untrusted, a failed trust check (with either bool
+// value), and an empty cwd all keep the built-in defaults, so a cloned repo's
+// .pig/command-policy.json cannot loosen the policy before the user trusts
+// the project.
+func TestPolicyForTrustGate(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".pig"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := []byte(`{"allow": ["projectcmd"], "onUnlisted": "deny"}`)
+	if err := os.WriteFile(filepath.Join(dir, ".pig", "command-policy.json"), config, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	projectApplied := defaultPolicy
+	projectApplied.Allow = []string{"projectcmd"}
+	projectApplied.OnUnlisted = "deny"
+
+	trustErr := errors.New("host unreachable")
+	cases := []struct {
+		name     string
+		cwd      string
+		trusted  bool
+		trustErr error
+		chdir    bool // run from dir so a relative .pig/ read would hit the fixture
+		want     policy
+	}{
+		{"trusted project reads config", dir, true, nil, false, projectApplied},
+		{"untrusted project skips config", dir, false, nil, false, defaultPolicy},
+		{"trust error skips config", dir, true, trustErr, false, defaultPolicy},
+		{"untrusted trust error skips config", dir, false, trustErr, false, defaultPolicy},
+		{"empty cwd skips config", "", true, nil, true, defaultPolicy},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.chdir {
+				t.Chdir(dir)
+			}
+			got := policyFor(c.cwd, c.trusted, c.trustErr)
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("policyFor(%q, %v, %v) = %+v, want %+v", c.cwd, c.trusted, c.trustErr, got, c.want)
+			}
+		})
 	}
 }
