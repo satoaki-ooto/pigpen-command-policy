@@ -7,7 +7,7 @@ Enforces workspace trust before reading project-local configuration, layers proj
 ## ADDED Requirements
 
 ### Requirement: Workspace trust gate for project configuration
-The extension SHALL read `<cwd>/.pig/command-policy.json` only when `ctx.IsProjectTrusted()` returns `true`; when `IsProjectTrusted()` returns `false` or an error, project config SHALL NOT be read and the user SHALL be notified via `ctx.Notify`.
+The extension SHALL read `<cwd>/.pig/command-policy.json` only when `ctx.IsProjectTrusted()` returns `true`; when `IsProjectTrusted()` returns `false` or an error, project config SHALL NOT be read and the user SHALL be notified via `ctx.Notify(..., "warn")`.
 
 #### Scenario: Untrusted project ignores project config and blocks unmatched commands
 - **WHEN** `IsProjectTrusted()` returns `false` (or an error) and `<cwd>/.pig/command-policy.json` sets `onUnlisted: "allow"`

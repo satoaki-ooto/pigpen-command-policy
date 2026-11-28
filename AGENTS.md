@@ -28,7 +28,7 @@ Work on the issue's branch only. One PR per issue; the PR should close its issue
 The full design, specifications, and stage tasks live in the repository under OpenSpec (`openspec/changes/command-policy-permission-rules/`):
 
 - `proposal.md`: motivation, scope, and capability list
-- `design.md`: architecture, Decisions 1–6, layering/trust, and the 11-wrapper syntax table
+- `design.md`: architecture, Decisions 1–7 (including layering/trust), and the 11-wrapper syntax table
 - `specs/<capability>/spec.md`: normative requirements and verifiable scenarios
 - `tasks.md`: stage-by-stage checklist mapped to Issues #3–#8
 

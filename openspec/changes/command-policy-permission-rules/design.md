@@ -163,7 +163,7 @@ Unknown options, unsupported combined short-option clusters, and missing option/
 
 ## Decisions
 
-All 6 numbered decisions plus layering/trust are settled by the project owner (2026-11-21); there are no open questions.
+All 7 numbered decisions are settled by the project owner (2026-11-21); there are no open questions.
 
 | # | Topic | Decision | Rationale & Alternatives Considered | Revisit When |
 | --- | --- | --- | --- | --- |
