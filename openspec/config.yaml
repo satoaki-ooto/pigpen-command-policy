@@ -1,0 +1,18 @@
+schema: spec-driven
+
+context: |
+  Target: command-policy extension for PiG 0.7.0 Go SDK (sdk-51955af53b263ab7).
+  Architecture constraint: policy.go (judgment layer) and shell.go (lexical layer) MUST NOT import the PiG SDK; only extension.go (connection layer) imports it.
+  Security constraint: Fail closed. When the parser cannot determine the program name or encounters malformed syntax, the result must not be allow.
+  Compatibility reference: Droid 1.12.1 permissionRules (`droid rules check --file <rules.json> --command '<cmd>' --json`), with intentional stricter divergences documented in design.md and tests.
+  Validation command: `mise run check` (gofmt, go vet, go test, pig install --validate-only).
+
+rules:
+  proposal:
+    - Always state explicit out-of-scope boundaries.
+  specs:
+    - Keep each requirement description under 500 characters and state one behavior per requirement.
+    - Every scenario must include WHEN and THEN steps.
+  tasks:
+    - Map numbered task groups directly to milestone stages (Stages 1-6).
+    - Include an explicit verification method in every task checkbox.
