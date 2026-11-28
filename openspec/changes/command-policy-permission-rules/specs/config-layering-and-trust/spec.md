@@ -18,7 +18,7 @@ The extension SHALL check `ctx.IsProjectTrusted()` at `session_start` and each `
 - **THEN** `<cwd>/.pig/command-policy.json` is loaded and participates in evaluation normally
 
 ### Requirement: Untrusted project notification and block behavior
-When `ctx.IsProjectTrusted()` returns `false` or an error, the extension SHALL notify the user once at `session_start` via `ctx.Notify(..., "warn")` (verify `"warn"` vs SDK-documented `"warning"`) and SHALL block unmatched commands regardless of `onUnlisted` with the reason in the block `reason` rather than repeating `Notify` per `tool_call`.
+When `ctx.IsProjectTrusted()` returns `false` or an error, the extension SHALL notify the user once at `session_start` via `ctx.Notify(..., "warning")` and SHALL block unmatched commands regardless of `onUnlisted` with the reason in the block `reason` rather than repeating `Notify` per `tool_call`.
 
 #### Scenario: Untrusted project ignores project config and blocks unmatched commands
 - **WHEN** `IsProjectTrusted()` returns `false` (or an error) and `<cwd>/.pig/command-policy.json` sets `onUnlisted: "allow"` (or defines project `allow`/`deny` rules)

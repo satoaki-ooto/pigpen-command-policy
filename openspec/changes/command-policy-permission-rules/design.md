@@ -177,7 +177,7 @@ All 7 numbered decisions are settled by the project owner (2026-11-21); there ar
 
 ## Risks / Trade-offs
 
-- **[Skipped block rule on failed `tests`]** -> Mitigated by surfacing every problem at `session_start` via `ctx.Notify(..., "warn")`, showing problem count in the status bar, and listing failing rules in `/command-policy`.
+- **[Skipped block rule on failed `tests`]** -> Mitigated by surfacing every problem at `session_start` via `ctx.Notify(..., "warning")`, showing problem count in the status bar, and listing failing rules in `/command-policy`.
 - **[Untrusted non-interactive sessions block unmatched commands]** -> Documented behavior: projects run non-interactively must be trusted beforehand; only built-in and user rule matches pass when untrusted.
 - **[Bounded wrapper option tables reject valid uncommon flags]** -> Fail-closed by design (returns parse error rather than risking misidentifying the command name); tables can be extended as needed.
 - **[Breaking change for legacy `.pig/command-policy.json` in Stage 3]** -> Accepted for 0.1.0; `README.md` is updated in Stage 3 to document the new format.

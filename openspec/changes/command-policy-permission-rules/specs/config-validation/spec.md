@@ -28,11 +28,11 @@ The judgment layer SHALL verify each rule's `tests.match` and `tests.noMatch` en
 - **THEN** only the failing rule is skipped, a problem diagnostic is recorded, no command is executed, and the other valid rules remain active
 
 ### Requirement: Session-start warnings and status-bar problem counts
-The connection layer SHALL list all detected configuration problems and emit a warning via `ctx.Notify(..., "warn")` at `session_start`, and SHALL display both the active rule count and the problem count in the status bar.
+The connection layer SHALL list all detected configuration problems and emit a warning via `ctx.Notify(..., "warning")` at `session_start`, and SHALL display both the active rule count and the problem count in the status bar.
 
 #### Scenario: Config problems reported at session_start and in status
 - **WHEN** a session starts with a config source containing structural errors or rules failing self-tests
-- **THEN** `session_start` notifies the user with level `"warn"` listing the problems, and the status bar reports accurate active-rule and problem counts
+- **THEN** `session_start` notifies the user with level `"warning"` listing the problems, and the status bar reports accurate active-rule and problem counts
 
 ### Requirement: Per-call config re-reading
 The extension SHALL re-read and validate configuration files on every `bash` `tool_call` so rule edits take effect immediately without restarting PiG.

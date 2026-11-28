@@ -10,8 +10,8 @@ Tracked under GitHub Milestone #1 (`command-policy: permissionRules-style rule f
 
 ## 2. Stage 2 — Do not read project config in untrusted projects (Issue #4)
 
-- [x] 2.1 (Issue #19) Gate project config loading in both `OnSessionStart` and `EventToolCall` on non-empty `cwd` and `ctx.IsProjectTrusted()` returning `(true, nil)` (treating `false` and errors as untrusted, without caching trust state across events), keeping trust checking/loading injectable and unit-testable outside `sdk.Context` (since `sdk.Context` is a concrete struct with no test fake), and verify unit tests cover trusted, untrusted, error, and empty-`cwd` branches (verified by `TestPolicyForTrustGate` & `mise run check`; unconditional blocking of unmatched commands in untrusted projects completes in §2.2 / Issue #20)
-- [ ] 2.2 (Issue #20) When untrusted, ignore `<cwd>/.pig/command-policy.json`, allow/block built-in (`defaultPolicy`) matches by their own decision, block all unmatched commands regardless of `onUnlisted` with an explanatory block `reason`, and emit a single `ctx.Notify` notice at `session_start` (confirming `"warn"` vs SDK-documented `"warning"` level); verify `TestEvaluate`, `TestEvaluateOnUnlisted`, new trust unit tests, and `mise run check` pass
+- [x] 2.1 (Issue #19) Gate project config loading in both `OnSessionStart` and `EventToolCall` on non-empty `cwd` and `ctx.IsProjectTrusted()` returning `(true, nil)` (treating `false` and errors as untrusted, without caching trust state across events), keeping trust checking/loading injectable and unit-testable outside `sdk.Context` (since `sdk.Context` is a concrete struct with no test fake), and verify unit tests cover trusted, untrusted, error, and empty-`cwd` branches (verified by `TestPolicyForTrustGate` & `mise run check`; unconditional blocking of unmatched commands and the `session_start` notification in untrusted projects complete in §2.2 / Issue #20)
+- [ ] 2.2 (Issue #20) When untrusted, ignore `<cwd>/.pig/command-policy.json`, allow/block built-in (`defaultPolicy`) matches by their own decision, block all unmatched commands regardless of `onUnlisted` with an explanatory block `reason`, and emit a single `ctx.Notify` notice at `session_start` with level `"warning"`; verify `TestEvaluate`, `TestEvaluateOnUnlisted`, new trust unit tests, and `mise run check` pass
 
 ## 3. Stage 3 — Judge commands by rule format (Issue #5)
 
@@ -24,7 +24,7 @@ Tracked under GitHub Milestone #1 (`command-policy: permissionRules-style rule f
 
 - [ ] 4.1 Add strict JSON decoding (`DisallowUnknownFields`) and source-level structural validation (missing required fields, invalid `decision`, duplicate `id` within one source) that drops the entire source on error; verify unit tests cover each failure mode
 - [ ] 4.2 Add non-executing `tests` (`match` / `noMatch`) self-verification that skips only the failing rule and records diagnostics; verify unit tests confirm other valid rules still load
-- [ ] 4.3 Surface problem diagnostics via `ctx.Notify(..., "warn")` at `session_start` and display active rule and problem counts in the status bar; verify tests and `mise run check` pass
+- [ ] 4.3 Surface problem diagnostics via `ctx.Notify(..., "warning")` at `session_start` and display active rule and problem counts in the status bar; verify tests and `mise run check` pass
 
 ## 5. Stage 5 — Layer user config with protected built-in deny rules (Issue #7)
 
